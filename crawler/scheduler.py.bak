@@ -1,0 +1,168 @@
+# -*- coding: utf-8 -*-
+from .searching import BiddingSearching
+from .parseing import PageParseing
+from .crawler import BiddingCrawler
+from .storing import BiddingStoring
+from .exceptions import (ForbiddenError, ServiceUnavailableError)
+from .setting import TASK_WAIT_INTERVAL, PAGE_WAIT_INTERVAL
+
+import queue
+import logging
+import logging.config
+import threading
+import time
+import sys
+from os import path
+
+log_file_path = path.join(path.dirname(path.abspath(__package__)), 'conf/logging.conf')
+
+logging.config.fileConfig(log_file_path)
+logger = logging.getLogger('main.scheduler')
+
+
+class CrawlerSchduler(threading.Thread):
+    """
+    CrawlerSchduler 负责爬虫的调度
+    
+    由于每次调度都可能会产生抓取和入库，在这期间可能会有新的采购公告产生，可能会导致数据漏爬，
+    为了解决这个问题，每天晚上 11 点，都会对当天产生的公告进行一次统一抓取。
+
+    """
+    
+    def __init__(self, number, work_queue):
+        threading.Thread.__init__(self)
+
+        self.number = number  # 线程编号
+
+        self.work_queue = work_queue
+
+        self.searcher = None
+        self.stored = None
+        self.page_parser = None
+
+
+    def _crawler_progress(self, current, max_size):
+        """
+        页面采集进度条，用于显示页面采集进度
+        """
+        sys.stdout.write("  已解析页面:%.2f%%" % float(current / max_size) + '\r')
+        sys.stdout.flush()
+
+    def _wait_progress(self):
+        """
+        任务暂定进度条，以倒计时方式显示时间进度
+        """
+        # 休息 5 分钟，等待下次检索
+        for second in range(TASK_WAIT_INTERVAL, -1, -1):
+            sys.stdout.write(" 下次采集倒计时：%02d:%02d，可以使用 Ctrl+C 终止采集程序执行" % (second // 60,second % 60) + '\r')
+            sys.stdout.flush()
+            time.sleep(1)
+
+    def _reload_last_processed(self):
+        """
+        重新加载上一次任务执行后的处理结果
+        """
+        self.searcher = BiddingSearching()
+
+        self.stored = BiddingStoring(work_queue)
+
+        # 初始化重复检查器
+        last_record_size = self.stored.reload_bidding_cache()
+
+        self.page_parser = PageParseing()
+        self.page_parser.last_processed_record_size = last_record_size
+
+    def run(self):
+
+        try:
+            self._reload_last_processed()
+
+            # 任务运行次数
+            job_running_count = 1
+
+            while True:
+                logger.info('开始任务启动后的第 %s 次数据采集。' % job_running_count)
+
+                page_size = self.page_parser.parse(self.searcher.search())
+                additional_record_size = self.page_parser.additional_record_size
+                logger.info('本次采集将要获取 {} 条采购公告，分为 {} 页。'.format(additional_record_size, page_size))
+
+                if additional_record_size <= 0:
+                    # 休息 5 分钟，等待下次检索
+                    self._wait_progress()
+                    # 准备下一次检索
+                    job_running_count += 1
+                    continue
+
+                # 2 秒后再开始数据采集，防止速度过快导致 403
+                time.sleep(2)
+
+                is_success = False
+
+                for i in range(page_size):
+                    page_index = i + 1
+                    # 不使用多线程，http://www.ccgp.gov.cn/ 可能有爬虫识别，过快的抓取会导致页面 403
+                    t = BiddingCrawler('t' + str(page_index), page_index, self.work_queue)
+
+                    try:
+                        biddings = t.get_biddings(page_index)
+
+                        for b in biddings:
+                            self.work_queue.put(b)
+
+                        self._crawler_progress(page_index, page_size)
+
+                        # 等待 2 秒，降低搜索频率，防止被网站认为是爬虫
+                        time.sleep(PAGE_WAIT_INTERVAL)
+
+                        is_success = True
+                    except (ForbiddenError, ServiceUnavailableError) as err:
+                        self._crawler_progress(page_index, page_size)
+                        logger.error("Search error: {0}".format(err))
+                        time.sleep(1)
+                        # 一旦发生这类错误，下次再采集
+                        break
+                    except Exception as err:
+                        logger.error("Unknow error: {0} type {1}".format(err, type(err)))
+                        # 一旦发生这类错误，下次再采集
+                        break
+
+                if is_success:
+                    # 更新本次查询结果，下次检索时将跳过已检索的数据
+                    self.page_parser.last_processed_record_size = self.page_parser.max_record_size
+
+                    logger.info('页面采集完成，本次采集公告 {} 条。'.format(work_queue.qsize()))
+
+                    logger.info('开始存储采集公告。')
+                    self.stored.stored()
+                    logger.info('公告存储完成，5 分钟后将进行新一轮的数据采集。')
+                else:
+                    logger.info('本次采集发生错误，5 分钟后将进行新一轮的数据采集。')
+
+                # 休息 5 分钟，等待下次检索
+                self._wait_progress()
+                
+                # 准备下一次检索
+                job_running_count += 1
+        except KeyboardInterrupt:
+            logger.info('received keyboard interrupt signal')
+
+
+
+if __name__ == "__main__":
+
+    logger.info('Crawler Scheduler Startup...')
+
+    req_thread = []
+    work_queue = queue.Queue(0)
+
+    t = CrawlerSchduler(1, work_queue)
+    t.start()
+
+    req_thread.append(t)
+
+    for t in req_thread:
+        t.join()
+    
+    logger.info('Crawler Scheduler End.')
+

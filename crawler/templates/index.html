@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block title %}公开招标信息收集{% endblock %}
+
+{% block page_content %}
+<div>
+    <ul class="nav navbar-nav">
+        信息来源：
+        <a href="http://www.ccgp.gov.cn/">中国政府采购网</a>
+    </ul>
+</div>
+<br/>
+<div>
+    <li>
+    公告时间
+    <span style="color:rgb(85, 9, 238)">
+        {{ data.min_pub_time  }}--{{ data.max_pub_time }} 
+    </span>内共有
+   
+    <span style="color:rgb(21, 234, 13)">
+        {{ data.total }}
+    </span>条招标信息
+  
+</li>
+       
+</div>
+    <table class="table table-bordered">
+    <tr>
+        <th>ID</th>
+        <th>采购名称</th>
+        <th>来源</th>
+        <th>采购类型</th>
+        <th>公告时间</th>
+        <th>地区</th>
+        <th>采购方</th>
+        <th>代理机构</th>
+    </tr>
+        {% for i in data.u %}
+            <tr>
+                <td>{{ i[0] }}</td>
+                <td>{{ i[1] }}</td>
+                <td>{{ i[2] }}</td>
+                <td>{{ i[3] }}</td>
+                <td>{{ i[4] }}</td>
+                <td>{{ i[5] }}</td>
+                <td>{{ i[6] }}</td>
+                <td>{{ i[7] }}</td>
+            </tr>
+    {% endfor %}
+    </table>
+
+{% endblock %}
